@@ -1,7 +1,9 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
+#include <poll.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -83,7 +85,7 @@ static void ssa_disconnect_client(struct ssa_client *client)
 	//(void) atomic_dec(&client->refcnt);
 }
 
-static void ssa_svr_accept(void)
+static int ssa_svr_accept(void)
 {
 	int s, i;
 
@@ -91,7 +93,7 @@ static void ssa_svr_accept(void)
 	s = accept(listen_socket, NULL, NULL);
 	if (s == -1) {
 		printf("%s: ERROR - failed to accept connection\n", __func__ );
-		return;
+		return -1;
 	}
 
 	for (i = 0; i < FD_SETSIZE - 1; i++) {
@@ -103,12 +105,13 @@ static void ssa_svr_accept(void)
 	if (i == FD_SETSIZE - 1) {
 		printf("%s: ERROR - all connections busy - rejecting\n", __func__);
 		close(s);
-		return;
+		return -1;
 	}
 
 	client_array[i].sock = s;
 	//atomic_set(&client_array[i].refcnt, 1);
 	printf("%s: assigned client %d\n", __func__, i);
+	return i;
 }
 
 static void ssa_svr_receive(struct ssa_client *client)
@@ -160,10 +163,11 @@ out:
 		ssa_disconnect_client(client);
 }
 
-static void ssa_server(void)
+static void *ssa_server(void)
 {
-	fd_set readfds;
-	int i, n, ret;
+	struct pollfd **fds;
+	struct pollfd *pfd;
+	int i, ret, client_index, slot;
 
 	printf("%s: started\n", __func__);
 	ssa_init_server();
@@ -173,35 +177,64 @@ static void ssa_server(void)
 		return;
 	}
 
-	while (1) {
-		n = (int) listen_socket;
-		FD_ZERO(&readfds);
-		FD_SET(listen_socket, &readfds);
+	fds = calloc(FD_SETSIZE, sizeof(**fds));
+	if (!fds)
+		goto out;
 
-		for (i = 0; i < FD_SETSIZE - 1; i++) {
-			if (client_array[i].sock != -1) {
-				FD_SET(client_array[i].sock, &readfds);
-				n = max(n, (int) client_array[i].sock);
-			}
-		}
+	pfd = (struct pollfd *)fds;
+	pfd->fd = listen_socket;
+	pfd->events = POLLIN;
+	pfd->revents = 0;
 
-		ret = select(n + 1, &readfds, NULL, NULL, NULL);
-		if (ret == -1) {
-			printf("%s: ERROR - server select error\n", __func__);
+	for (i = 1; i < FD_SETSIZE; i++) {
+		pfd = (struct pollfd *)(fds + i);
+		pfd->fd = -1; /* placeholder for client connections */
+		pfd->events = 0;
+		pfd->revents = 0;
+	}
+
+	for (;;) {
+		ret = poll((struct pollfd *)fds, FD_SETSIZE, -1);
+		if (ret < 0) {
+			printf("%s: ERROR - server poll\n", __func__);
 			continue;
 		}
 
-		if (FD_ISSET(listen_socket, &readfds))
-			ssa_svr_accept();
+		pfd = (struct pollfd *)fds;
+		if (pfd->revents) {
+			pfd->revents = 0;
+			client_index = ssa_svr_accept();
+			if (client_index < 0)
+				goto out;
 
-		for (i = 0; i < FD_SETSIZE - 1; i++) {
-			if (client_array[i].sock != -1 &&
-				FD_ISSET(client_array[i].sock, &readfds)) {
-				printf("%s: receiving from client %d\n", __func__, i);
-				ssa_svr_receive(&client_array[i]);
+			/* Indices correlation: client_index = fds_index - 1 */
+			pfd = (struct pollfd *)(fds + client_index + 1);
+			pfd->fd = client_array[client_index].sock;
+			pfd->events = POLLIN;
+			pfd->revents = 0;
+		}
+
+		for (i = 1; i < FD_SETSIZE; i++) {
+			pfd = (struct pollfd *)(fds + i);
+			if (pfd->revents) {
+				if (pfd->revents & (POLLERR | POLLHUP | POLLNVAL)) {
+					/* close connection */
+					client_array[i - 1].sock = -1;
+					pfd->fd = -1;
+					pfd->events = 0;
+				} else {
+					printf("%s: receiving from client %d\n", __func__, i - 1);
+					ssa_svr_receive(&client_array[i - 1]);
+				}
+				pfd->revents = 0;
 			}
 		}
 	}
+out:
+	if (fds)
+		free(fds);
+
+	return NULL;
 }
 
 int main()
