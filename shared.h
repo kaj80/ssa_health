@@ -11,7 +11,7 @@
 #define SSA_HEALTH_UPDATES_NUM		0x05
 #define SSA_HEALTH_ACK			0x80
 
-#define SSA_HEALTH_MSG_HDR_LEN		16
+#define SSA_HEALTH_MSG_HDR_LEN		8
 #define SSA_HEALTH_NODE_TYPE_LEN	8
 #define SSA_HEALTH_NODE_VERSION_LEN	24
 #define SSA_DTREE_NODE_DATA_LEN		8
@@ -26,11 +26,10 @@ enum {
 
 struct msg_hdr {
 	uint8_t                 version;
-	uint8_t                 opcode;
 	uint8_t                 status;
-	uint8_t		        data[3];
+	uint16_t                opcode;
 	uint16_t                length;
-	uint64_t                tid;
+	uint8_t			pad[2];
 };
 
 struct ssa_health_node_version {
@@ -57,7 +56,7 @@ struct ssa_dtree_node_data {
 
 struct ssa_health_msg {
 	struct msg_hdr                  hdr;
-	union {
+	union { /* not sure if union is a good idea */
 		struct ssa_health_node_type	node_type;
 		struct ssa_health_node_version	node_version;
 		struct ssa_dtree_node_data	conn_data;
